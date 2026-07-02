@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>地学 AI 交互纠偏平台</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --sidebar-width: 300px;
+            --panel-bg: #ffffff;
+            --bg: #f1f5f9;
+        }
+
+        body { font-family: system-ui, sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--bg); }
+
+        /* 上侧微调栏 - 收缩为窄条 */
+        .top-bar {
+            background: #1e293b; color: white; padding: 10px 20px;
+            display: flex; align-items: center; gap: 20px; z-index: 100;
+        }
+        .top-bar input { background: #334155; border: 1px solid #475569; color: white; padding: 5px 10px; border-radius: 4px; width: 250px; font-size: 12px; }
+
+        /* 主布局 */
+        .main-container { display: flex; flex: 1; overflow: hidden; }
+
+        /* 左侧边栏 */
+        .sidebar {
+            width: var(--sidebar-width); background: var(--panel-bg);
+            border-right: 1px solid #e2e8f0; display: flex; flex-direction: column;
+        }
+        .sidebar-header { padding: 15px; border-bottom: 1px solid #eee; font-weight: bold; }
+        .file-list { flex: 1; overflow-y: auto; padding: 10px; }
+        .file-item { 
+            padding: 10px; margin-bottom: 5px; border-radius: 6px; cursor: pointer; 
+            border: 1px solid transparent; transition: all 0.2s; font-size: 13px;
+        }
+        .file-item:hover { background: #f8fafc; }
+        .file-item.active { background: #eff6ff; border-color: var(--primary); color: var(--primary); }
+
+        /* 右侧画布区 */
+        .content-area { flex: 1; position: relative; display: flex; flex-direction: column; background: #cbd5e1; }
+        
+        /* 工具栏 */
+        .canvas-tools {
+            background: white; padding: 10px 20px; display: flex; align-items: center; gap: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        /* 画布容器 */
+        .canvas-container {
+            flex: 1; position: relative; display: flex; justify-content: center; align-items: center;
+            overflow: auto; padding: 20px;
+        }
+        .canvas-wrapper { position: relative; box-shadow: 0 0 20px rgba(0,0,0,0.2); background: white; }
+        #base-image { display: block; max-width: 100%; height: auto; }
+        #mask-canvas { position: absolute; top: 0; left: 0; cursor: crosshair; }
+
+        .btn { padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-weight: 500; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-tool { background: #f1f5f9; color: #475569; }
+        .btn-tool.active { background: var(--primary); color: white; }
+    </style>
+</head>
+<body>
+    
+<div class="top-bar">
+    <div style="font-weight: bold; margin-right: 10px;">Model Finetune</div>
+    <input type="text" id="train-path" placeholder="训练数据路径" value="D:\Program\月球大模型-地球化学所\标签修改\training_data_path">
+    <button class="btn btn-primary" onclick="startTrain()">一键启动训练</button>
+    <div id="train-status" style="font-size: 12px; color: #94a3b8;">等待指令...</div>
+</div>
+
+<div class="main-container">
+    <div class="sidebar">
+        <div class="sidebar-header">文件资源浏览器</div>
+        <div style="padding: 15px;">
+            <button class="btn btn-tool" style="width: 100%;" onclick="loadTrainImages()">加载训练集图片列表</button>
+        </div>
+        <div class="file-list" id="file-list"></div>
+    </div>
+
+    <div class="content-area">
+        <div class="canvas-tools">
+            <div style="display: flex; gap: 5px;">
+                <button class="btn btn-tool active" id="tool-brush" onclick="setTool('brush')">🖌️ 画笔</button>
+                <button class="btn btn-tool" id="tool-eraser" onclick="setTool('eraser')">🧽 橡皮擦</button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px; font-size: 13px;">
+                <span>Mask 透明度:</span>
+                <input type="range" id="opacity-range" min="0" max="100" value="50" oninput="updateOpacity(this.value)" style="accent-color: #f43f5e;">
+            </div>
+            <button class="btn btn-primary" style="margin-left: auto;" onclick="saveCorrection()">保存人工纠偏数据</button>
+        </div>
+
+        <div class="canvas-container">
+            <div class="canvas-wrapper" id="canvas-wrapper">
+                <img id="base-image" src="" alt="">
+                <canvas id="mask-canvas" style="display:block;position:absolute;top:0;left:0;width:100%;height:100%;"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let currentTool = 'brush';
+    let isDrawing = false;
+    const canvas = document.getElementById('mask-canvas');
+    const ctx = canvas.getContext('2d');
+    const baseImg = document.getElementById('base-image');
+
+
+    // 自动列出训练集图片
+    async function loadTrainImages() {
+        const trainPath = document.getElementById('train-path').value;
+        const imagesDir = trainPath.replace(/\\/g, '/').replace(/\/$/, '') + '/Images';
+        // 假设根目录key为'service'，可根据实际调整
+        const rootKey = 'service';
+        // 获取相对路径
+        let rel = imagesDir;
+        const rootVal = {
+            'data': 'D:/Program/月球大模型-地球化学所/标签修改/data',
+            'home': 'D:/Program/月球大模型-地球化学所',
+            'service': 'D:/Program/月球大模型-地球化学所/标签修改'
+        };
+        if (imagesDir.startsWith(rootVal[rootKey])) {
+            rel = imagesDir.slice(rootVal[rootKey].length).replace(/^\/+/, '');
+        }
+        const resp = await fetch(`/files?root_key=${rootKey}&subdir=${encodeURIComponent(rel)}&pattern=*.fits`, {
+            headers: { 'X-Token': 'change-me' }
+        });
+        const data = await resp.json();
+        const list = document.getElementById('file-list');
+        list.innerHTML = "";
+        window._inferResults = [];
+        if (!data.items || !data.items.length) {
+            list.innerHTML = '<div style="color:#888;padding:10px;">未找到训练集图片</div>';
+            return;
+        }
+        data.items.forEach((item, idx) => {
+            const div = document.createElement('div');
+            div.className = 'file-item';
+            div.innerHTML = `📄 ${item.name}`;
+            div.onclick = () => {
+                document.querySelectorAll('.file-item').forEach(e => e.classList.remove('active'));
+                div.classList.add('active');
+                inferTrainImage(item, idx);
+            };
+            list.appendChild(div);
+        });
+    }
+
+    // 推理训练集图片
+    async function inferTrainImage(item, idx) {
+        const trainPath = document.getElementById('train-path').value;
+        const imagesDir = trainPath.replace(/\\/g, '/').replace(/\/$/, '') + '/Images';
+        // 拼接绝对路径
+        const absPath = imagesDir + '/' + item.name;
+        // 通过 select_files 获取绝对路径
+        const rootKey = 'service';
+        const resp = await fetch('/files/select', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Token': 'change-me' },
+            body: JSON.stringify({ root_key: rootKey, relpaths: [absPath] })
+        });
+        const data = await resp.json();
+        if (!data.full_paths || !data.full_paths.length) {
+            alert('找不到文件: ' + absPath);
+            return;
+        }
+        // 后端需实现/infer_by_path接口，传递本地路径
+        const inferResp = await fetch('/infer_by_path', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Token': 'change-me' },
+            body: JSON.stringify({ path: data.full_paths[0] })
+        });
+        if (!inferResp.ok) {
+            alert('推理失败');
+            return;
+        }
+        const inferData = await inferResp.json();
+        window._inferResults[idx] = inferData;
+        showInferResult(idx);
+    }
+
+
+    // 展示推理结果到画布
+    function showInferResult(idx) {
+        const result = window._inferResults && window._inferResults[idx];
+        if (!result) return;
+        if (result.error) {
+            baseImg.src = "";
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            alert(result.filename + ': ' + result.error);
+            return;
+        }
+        // 原图
+        baseImg.src = 'data:image/png;base64,' + result.original;
+        baseImg.onload = () => {
+            // 计算自适应缩放
+            const wrapper = document.getElementById('canvas-wrapper');
+            const maxW = wrapper.clientWidth;
+            const maxH = wrapper.clientHeight;
+            const imgW = baseImg.naturalWidth;
+            const imgH = baseImg.naturalHeight;
+            let scale = Math.min(maxW / imgW, maxH / imgH, 1);
+            const drawW = Math.round(imgW * scale);
+            const drawH = Math.round(imgH * scale);
+            // 设置img和canvas尺寸
+            baseImg.style.width = drawW + 'px';
+            baseImg.style.height = drawH + 'px';
+            canvas.width = drawW;
+            canvas.height = drawH;
+            // mask
+            const maskImg = new window.Image();
+            maskImg.src = 'data:image/png;base64,' + result.mask;
+            maskImg.onload = () => {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                // 先画透明红色，再用mask alpha叠加
+                // 1. 先创建mask临时canvas
+                const maskCanvas = document.createElement('canvas');
+                maskCanvas.width = canvas.width;
+                maskCanvas.height = canvas.height;
+                const maskCtx = maskCanvas.getContext('2d');
+                maskCtx.drawImage(maskImg, 0, 0, canvas.width, canvas.height);
+                // 2. 获取mask像素，叠加红色
+                const maskData = maskCtx.getImageData(0, 0, canvas.width, canvas.height);
+                const data = maskData.data;
+                for (let i = 0; i < data.length; i += 4) {
+                    // 如果mask为白色(255,255,255)，则叠加红色
+                    if (data[i] > 127) {
+                        data[i] = 255;   // R
+                        data[i+1] = 0;   // G
+                        data[i+2] = 0;   // B
+                        data[i+3] = 128; // 半透明
+                    } else {
+                        data[i+3] = 0; // 完全透明
+                    }
+                }
+                maskCtx.putImageData(maskData, 0, 0);
+                ctx.drawImage(maskCanvas, 0, 0);
+            };
+        };
+    }
+
+    // 3. 画布交互逻辑
+    canvas.onmousedown = (e) => {
+        isDrawing = true;
+        ctx.beginPath();
+        ctx.moveTo(e.offsetX, e.offsetY);
+    };
+
+    canvas.onmousemove = (e) => {
+        if (!isDrawing) return;
+        
+        ctx.lineWidth = 10;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        if (currentTool === 'brush') {
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.strokeStyle = "rgba(255, 0, 0, 1)";
+        } else {
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.strokeStyle = "rgba(0, 0, 0, 1)";
+        }
+        
+        ctx.lineTo(e.offsetX, e.offsetY);
+        ctx.stroke();
+    };
+
+    canvas.onmouseup = () => isDrawing = false;
+
+    // 4. UI 辅助功能
+    function setTool(tool) {
+        currentTool = tool;
+        document.getElementById('tool-brush').classList.toggle('active', tool === 'brush');
+        document.getElementById('tool-eraser').classList.toggle('active', tool === 'eraser');
+    }
+
+    function updateOpacity(val) {
+        canvas.style.opacity = val / 100;
+    }
+
+    function startTrain() {
+        const btn = document.querySelector('.top-bar .btn');
+        btn.textContent = "正在训练...";
+        const trainPath = document.getElementById('train-path').value;
+        // 这里假设 masks 和 image_coords 为空对象，实际可根据需求调整
+        const payload = {
+            training_data_path: trainPath,
+            masks: {},
+            image_coords: {}
+        };
+        fetch('/train/start', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Token': 'change-me' // 如有实际 token 请替换
+            },
+            body: JSON.stringify(payload)
+        })
+        .then(async r => {
+            if (!r.ok) {
+                let err = await r.json().catch(()=>({}));
+                throw new Error(err.detail || '训练启动失败');
+            }
+            return r.json();
+        })
+        .then(d => {
+            document.getElementById('train-status').textContent = '训练已启动，job_id: ' + d.job_id;
+            btn.textContent = "一键启动训练";
+        })
+        .catch(e => {
+            document.getElementById('train-status').textContent = '错误: ' + e.message;
+            btn.textContent = "一键启动训练";
+        });
+    }
+
+    function saveCorrection() {
+        const correctedData = canvas.toDataURL();
+        let filename = '.fits';
+        const active = document.querySelector('.file-item.active');
+        if (active) {
+            const txt = active.textContent.trim();
+            if (txt.startsWith('📄')) {
+                const orig = txt.slice(1).trim();  
+                console.log("Original filename:", orig);
+                const baseName = orig.split('/').pop().split('\\').pop();
+                filename = baseName;
+            }
+        }
+        
+        const trainingPath = document.getElementById('train-path').value;
+        fetch('/save_correction', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Token': 'change-me'
+            },
+            body: JSON.stringify({
+                mask_b64: correctedData,
+                filename: filename,
+                training_data_path: trainingPath
+            })
+        })
+        .then(async r => {
+            if (!r.ok) {
+                let err = await r.json().catch(()=>({}));
+                throw new Error(err.detail || '保存失败');
+            }
+            return r.json();
+        })
+        .then(d => {
+            alert('已保存到: ' + d.path);
+        })
+        .catch(e => {
+            alert('保存失败: ' + e.message);
+        });
+    }
+</script>
+
+</body>
+</html>
